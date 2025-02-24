@@ -26,10 +26,19 @@ Diese Web Banking Extension ermöglicht den Zugriff auf Konten der Zürcher Kant
 
 ## Installation und Nutzung
 
-1. Speichere die Extension-Datei im Extensions-Verzeichnis von MoneyMoney:  
+### Betaversion installieren
+
+Diese Extension funktioniert ausschließlich mit Beta-Versionen von MoneyMoney.  
+Um eine Beta-Version zu erhalten, aktiviere in den allgemeinen Einstellungen die Option **"Participate in beta tests"** und **"Display pre-release versions"**.
+
+### Extension aktivieren
+
+1. **Öffne MoneyMoney** und öffne die Einstellungen (Cmd + ,).
+2. Gehe in den Reiter **Extensions** und deaktiviere den Haken bei **"Verify digital signatures of extensions"**.
+3. Wähle im Menü **Help > Show Database in Finder**.
+4. Kopiere die Datei `ZKB.lua` aus diesem Repository in den Extensions-Ordner:
    `~/Library/Containers/com.moneymoney-app.retail/Data/Library/Application Support/MoneyMoney/Extensions`
-2. Lege einen neuen Bankzugang mit dem Service "ZKB" an und gib Deine Zugangsdaten ein.
-3. Folge der Anleitung zur Foto-TAN-Authentifizierung.
+5. In MoneyMoney sollte nun beim Hinzufügen eines neuen Kontos der Service-Typ **ZKB** erscheinen.
 
 ## Lizenz
 
