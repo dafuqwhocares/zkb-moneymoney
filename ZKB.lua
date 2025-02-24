@@ -1,5 +1,5 @@
 --------------------------------------------------------------------------------
--- Zürcher Kantonalbank (ZKB) Extension for MoneyMoney (https://moneymoney-app.com)
+-- Zürcher Kantonalbank (ZKB) Extension for MoneyMoney https://moneymoney-app.com
 -- Copyright 2024-2025 Ansgar Scheffold
 --------------------------------------------------------------------------------
 WebBanking{
