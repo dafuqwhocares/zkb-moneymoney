@@ -1,11 +1,11 @@
 --------------------------------------------------------------------------------
--- ZKB Extension for https://moneymoney-app.com
+-- Zürcher Kantonalbank (ZKB) Extension for MoneyMoney (https://moneymoney-app.com)
 -- Copyright 2024-2025 Ansgar Scheffold
 --------------------------------------------------------------------------------
 WebBanking{
     version     = 1.00,
     url         = "https://onba.zkb.ch",
-    services    = {"ZKB"},
+    services    = {"Zürcher Kantonalbank"},
     description = "Abfrage des ZKB Kontos mit Foto-TAN-Authentifizierung"
 }
 
@@ -69,7 +69,7 @@ end
 -- Prüft, ob diese Extension für den angegebenen Bankzugang zuständig ist.
 --------------------------------------------------------------------------------
 function SupportsBank(protocol, bankCode)
-    return protocol == ProtocolWebBanking and bankCode == "ZKB Konto"
+    return protocol == ProtocolWebBanking and bankCode == "Zürcher Kantonalbank"
 end
 
 --------------------------------------------------------------------------------
