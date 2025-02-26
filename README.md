@@ -23,6 +23,9 @@ Diese Web Banking Extension ermöglicht den Zugriff auf Konten der Zürcher Kant
 
 - **Sitzungsmanagement:**  
   Bei jedem Abruf ist aktuell eine erneute Authentifizierung (Foto-TAN) notwendig – eine dauerhafte Sitzungsaufrechterhaltung wird noch nicht aktiv gehalten.
+  
+- **Fehlermanagement:**  
+  Wird eine Foto-TAN nicht bestätigt, fehlt aktuell noch die entsprechende Fehlermeldung.
 
 ## Installation und Nutzung
 
