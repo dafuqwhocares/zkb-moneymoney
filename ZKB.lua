@@ -3,274 +3,318 @@
 -- Copyright 2024-2025 Ansgar Scheffold
 --------------------------------------------------------------------------------
 WebBanking{
-    version     = 1.00,
+    version     = 1.01,
     url         = "https://onba.zkb.ch",
     services    = {"Zürcher Kantonalbank"},
     description = "Abfrage des ZKB Kontos mit Foto-TAN-Authentifizierung"
 }
 
 --------------------------------------------------------------------------------
--- Verbindungsobjekt und globale Variablen
+-- Constants and global variables
 --------------------------------------------------------------------------------
+local BASE_URL = "https://onba.zkb.ch"
 local connection = Connection()
-local modifiedGlobalData = nil  -- Speichert die modifizierte globalData
+local modifiedGlobalData = nil
 
---------------------------------------------------------------------------------
--- Standard-Header für alle HTTP-Anfragen
---------------------------------------------------------------------------------
+-- HTML entity mapping table
+local HTML_ENTITIES = {
+    ["&auml;"] = "ä", ["&Auml;"] = "Ä",
+    ["&ouml;"] = "ö", ["&Ouml;"] = "Ö",
+    ["&uuml;"] = "ü", ["&Uuml;"] = "Ü",
+    ["&szlig;"] = "ß",
+    ["&amp;"]  = "&",
+    ["&quot;"] = "\"",
+    ["&apos;"] = "'",
+    ["&lt;"]   = "<",
+    ["&gt;"]   = ">"
+}
+
+-- Default headers
 local headers = {
     ["Content-Type"] = "application/json",
     ["Accept"]       = "application/json",
-    ["User-Agent"]   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, wie Gecko) Chrome/94.0.4606.81 Safari/537.36",
-    ["Referer"]      = "https://onba.zkb.ch/ciam-auth/ui/login",
-    ["Origin"]       = "https://onba.zkb.ch"
+    ["User-Agent"]   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36",
+    ["Referer"]      = BASE_URL .. "/ciam-auth/ui/login",
+    ["Origin"]       = BASE_URL
 }
 
 --------------------------------------------------------------------------------
--- Aktualisiert den Header mit den aktuellen Cookies und extrahiert ggf. den XSRF-TOKEN.
+-- Helper functions
 --------------------------------------------------------------------------------
+-- Update headers with cookies and extract XSRF token
 local function updateHeadersFromCookies()
     local cookies = connection:getCookies() or ""
     headers["Cookie"] = cookies
+    
+    -- Extract XSRF token
     local xsrf = cookies:match("XSRF%-TOKEN=([^;]+)")
     if xsrf then
         headers["X-XSRF-TOKEN"] = xsrf
-    else
-        print("Kein XSRF-TOKEN gefunden.")
     end
 end
 
---------------------------------------------------------------------------------
--- Ruft globalData vom Server ab und ersetzt den Hostnamen.
---------------------------------------------------------------------------------
+-- Fetch and modify globalData
 local function getModifiedGlobalData()
-    local preLoginUrl = "https://onba.zkb.ch/ciam-auth/api/web/webAuth/globalData"
-    local globalResponse, charset = connection:request("GET", preLoginUrl, nil, nil, headers)
-    if not globalResponse then
-        error("Keine Antwort von der globalData-API")
+    local globalDataUrl = BASE_URL .. "/ciam-auth/api/web/webAuth/globalData"
+    local response = connection:request("GET", globalDataUrl, nil, nil, headers)
+    
+    if not response then
+        error("Failed to fetch globalData API")
     end
     
-    local modifiedResponse = globalResponse:gsub(
+    -- Replace hostname in the response
+    local modifiedResponse = response:gsub(
         '"zkbChHostName"%s*:%s*"https://www%.zkb%.ch"',
-        '"zkbChHostName":"https://onba.zkb.ch"'
+        '"zkbChHostName":"' .. BASE_URL .. '"'
     )
     
     modifiedGlobalData = JSON(modifiedResponse):dictionary()
+    return modifiedGlobalData
 end
 
---------------------------------------------------------------------------------
--- Liefert die Basis-URL, entweder aus modifiedGlobalData oder als Standard.
---------------------------------------------------------------------------------
+-- Get base URL from globalData or use default
 function HomePage()
-    return (modifiedGlobalData and modifiedGlobalData["zkbChHostName"]) or "https://onba.zkb.ch"
+    return (modifiedGlobalData and modifiedGlobalData["zkbChHostName"]) or BASE_URL
+end
+
+-- Decode HTML entities in text
+local function decodeHtmlEntities(text)
+    return text:gsub("(&%a+;)", function(entity)
+        return HTML_ENTITIES[entity] or entity
+    end)
+end
+
+-- Clean and extract text from HTML
+local function extractText(html)
+    if not html then return "" end
+    local text = html:gsub("<.->", ""):gsub("^%s*(.-)%s*$", "%1")
+    return decodeHtmlEntities(text)
+end
+
+-- Clean account number by removing spaces
+local function cleanAccountNumber(number)
+    return number:gsub("%s+", "")
+end
+
+-- Parse amount string to number
+local function parseAmount(str)
+    if not str then return 0 end
+    
+    -- Remove unwanted characters and format number
+    str = str:gsub("[%z\194\160]", "")  -- Remove non-breaking spaces
+             :gsub("'", "")             -- Remove thousand separators
+             :gsub(",", ".")            -- Convert comma to decimal point
+             :gsub("CHF%s*", "")        -- Remove currency indicator
+             :gsub("%s+", "")           -- Remove all spaces
+    
+    return tonumber(str) or 0
+end
+
+-- Split transaction text into title and purpose
+local function splitTransactionText(text)
+    -- First try to split by colon
+    local title, desc = text:match("^(.-):%s*(.+)$")
+    if title then return title, desc end
+    
+    -- Then try to split by comma
+    title, desc = text:match("^(.-),%s*(.+)$")
+    if title then return title, desc end
+    
+    -- No separator found: entire text as title, empty description
+    return text, ""
+end
+
+-- Parse date string in format DD.MM.YYYY to timestamp
+local function parseDate(dateStr)
+    local day, month, year = dateStr:match("(%d%d)%.(%d%d)%.(%d%d%d%d)")
+    if day and month and year then
+        return os.time({year = tonumber(year), month = tonumber(month), day = tonumber(day)})
+    end
+    return nil
 end
 
 --------------------------------------------------------------------------------
--- Prüft, ob diese Extension für den angegebenen Bankzugang zuständig ist.
+-- TAN handling functions
 --------------------------------------------------------------------------------
+-- Poll TAN verification status
+function pollTanStatus()
+    local tanStatusUrl = HomePage() .. "/ciam-auth/api/web/webAuth/getOnlineTanVerificationState"
+    local retryInterval, maxRetries = 2, 30
+    
+    for attempt = 1, maxRetries do
+        MM.sleep(retryInterval)
+        updateHeadersFromCookies()
+        
+        local response = connection:request("POST", tanStatusUrl, "", "application/json", headers)
+        if not response then
+            if attempt == maxRetries then
+                error("No response from TAN verification API after multiple attempts")
+            end
+            print("No response from TAN status API. Retrying...")
+            goto continue
+        end
+        
+        -- Parse the response
+        local state
+        local ok, decoded = pcall(function() return JSON(response):dictionary() end)
+        if ok and type(decoded) == "table" and decoded["state"] then
+            state = decoded["state"]
+        else
+            state = response
+        end
+        
+        -- Clean up quoted string if needed
+        if type(state) == "string" then
+            state = state:gsub('^"(.*)"$', '%1')
+        end
+        
+        -- Check the TAN status
+        if state == "CORRECT" then
+            return true
+        elseif state == "FAILED" then
+            error("TAN verification failed. Please try again.")
+        elseif state ~= "NOT_VERIFIED" then
+            error("Unexpected TAN status: " .. (state or "null"))
+        end
+        
+        ::continue::
+    end
+    
+    error("TAN verification timed out after " .. maxRetries .. " attempts")
+end
+
+--------------------------------------------------------------------------------
+-- Core banking functions
+--------------------------------------------------------------------------------
+-- Check if this extension is responsible for the given bank access
 function SupportsBank(protocol, bankCode)
     return protocol == ProtocolWebBanking and bankCode == "Zürcher Kantonalbank"
 end
 
---------------------------------------------------------------------------------
--- Fragt den TAN-Status ab und wartet, bis die TAN bestätigt ist.
---------------------------------------------------------------------------------
-function pollTanStatus()
-    print("TAN-Statusprüfung gestartet...")
-    local tanStatusUrl = HomePage() .. "/ciam-auth/api/web/webAuth/getOnlineTanVerificationState"
-    
-    local retryInterval, maxRetries = 2, 30
-
-    for attempt = 1, maxRetries do
-        MM.sleep(retryInterval)
-        updateHeadersFromCookies()
-        local response = connection:request("POST", tanStatusUrl, "", "application/json", headers)
-        
-        if response then
-            local state = response
-            local ok, decoded = pcall(function() return JSON(response):dictionary() end)
-            if ok and type(decoded) == "table" and decoded["state"] then
-                state = decoded["state"]
-            end
-            if type(state) == "string" then
-                state = state:gsub('^"(.*)"$', '%1')
-            end
-            
-            if state == "CORRECT" then
-                print("TAN erfolgreich bestätigt.")
-                return true
-            elseif state == "NOT_VERIFIED" then
-                print("TAN noch nicht bestätigt. Wiederholen...")
-            elseif state == "FAILED" then
-                error("TAN-Überprüfung fehlgeschlagen. Bitte erneut versuchen.")
-            else
-                error("Unerwarteter TAN-Status: " .. (state or "null"))
-            end
-        else
-            print("Keine Antwort von TAN-Status-API.")
-        end
-    end
-
-    error("TAN-Bestätigung fehlgeschlagen: Zeitüberschreitung.")
-end
-
-
---------------------------------------------------------------------------------
--- Führt den Zwei-Schritte-Login durch: 
--- Schritt 1: Startet den Login und liefert die Foto-TAN-Challenge.
--- Schritt 2: Pollt den TAN-Status und schließt den Login ab.
---------------------------------------------------------------------------------
+-- Perform two-step login process
 function InitializeSession2(protocol, bankCode, step, credentials, interactive)
     if step == 1 then
-        getModifiedGlobalData()  -- Hole und modifiziere globalData
-        local loginUrl = HomePage() .. "/ciam-auth/api/web/webAuth/startLogin"
-        
-        -- Optional: Eine zusätzliche globalData-Anfrage (falls benötigt)
-        local gdResponse = connection:request("GET", HomePage() .. "/ciam-auth/api/web/webAuth/globalData", nil, nil, headers)
+        -- Step 1: Start login and retrieve photo TAN challenge
+        getModifiedGlobalData()
         updateHeadersFromCookies()
         
+        local loginUrl = HomePage() .. "/ciam-auth/api/web/webAuth/startLogin"
         local loginBody = JSON():set({
             loginName = credentials[1],
             password = credentials[2]
         }):json()
+        
         local response = connection:request("POST", loginUrl, loginBody, "application/json", headers)
         if not response then
-            error("Keine Antwort vom Login-Request")
+            error("No response from login request")
         end
-        local responseData = JSON(response):dictionary()
         
+        local responseData = JSON(response):dictionary()
         if responseData["action"] and responseData["action"]["_class"] == "auth.VerifyPhotoTanAction" then
             return {
                 title = "Scannen Sie die Grafik mit der ZKB-Access App",
                 challenge = MM.base64decode(responseData["action"]["challengePngImageBase64"]),
             }
         else
-            error("Unbekannte Antwort oder keine Foto-TAN erforderlich. Response: " .. response)
+            error("Unexpected response or no photo TAN required")
         end
-
+        
     elseif step == 2 then
+        -- Step 2: Poll TAN status and complete login
         updateHeadersFromCookies()
+        
         if pollTanStatus() then
             local nextActionUrl = HomePage() .. "/ciam-auth/api/web/webAuth/getNextActionAfterOnlineTanVerification"
             updateHeadersFromCookies()
+            
             local response = connection:request("POST", nextActionUrl, "", "application/json", headers)
             if not response then
-                error("Fehler beim Abschluss des Logins: Keine Antwort erhalten")
+                error("Failed to complete login: No response received")
             end
-            print("Login erfolgreich.")
-            return nil
+            
+            return nil -- Login successful
         else
-            error("Login fehlgeschlagen.")
+            error("Login failed")
         end
     else
-        error("Unbekannter Schritt: " .. tostring(step))
+        error("Unknown step: " .. tostring(step))
     end
 end
 
-
---------------------------------------------------------------------------------
--- Entfernt HTML-Tags und trimmt Leerzeichen.
---------------------------------------------------------------------------------
-local function extractText(html)
-    return html:gsub("<.->", ""):gsub("^%s*(.-)%s*$", "%1")
-end
-
---------------------------------------------------------------------------------
--- Entfernt Leerzeichen aus einer Kontonummer.
---------------------------------------------------------------------------------
-local function cleanAccountNumber(number)
-    return number:gsub("%s+", "")
-end
-
---------------------------------------------------------------------------------
--- Konvertiert einen Textbetrag in eine numerische Zahl.
---------------------------------------------------------------------------------
-local function parseAmount(str)
-    if not str then return 0 end
-    -- Entferne unerwünschte Zeichen und formatiere das Zahlenformat
-    str = str:gsub("[%z\194\160]", "")
-             :gsub("'", "")
-             :gsub(",", ".")
-             :gsub("CHF%s*", "")
-             :gsub("%s+", "")
-    local amount = tonumber(str)
-    return amount or 0
-end
-
---------------------------------------------------------------------------------
--- Teilt den Transaktionstext in Titel und Verwendungszweck auf
---------------------------------------------------------------------------------
-local function splitTransactionText(text)
-    -- Suche zuerst nach einem Doppelpunkt
-    local title, desc = text:match("^(.-):%s*(.+)$")
-    if title then 
-        return title, desc
-    end
-    -- Falls kein Doppelpunkt gefunden wurde, nach dem ersten Komma
-    title, desc = text:match("^(.-),%s*(.+)$")
-    if title then 
-        return title, desc
-    end
-    -- Kein Trenner gefunden: Gesamter Text als Titel, leere Beschreibung
-    return text, ""
-end
-
---------------------------------------------------------------------------------
--- Liest die Kontenliste aus der Kontoübersichtsseite aus.
---------------------------------------------------------------------------------
+-- List all accounts
 function ListAccounts(knownAccounts)
-    print("Kontenliste abrufen...")
-    local accountsUrl = "https://onba.zkb.ch/page/meinefinanzen/startseite.page?dswid=2820&hn=2&firstwindow=true"
+    local accountsUrl = BASE_URL .. "/page/meinefinanzen/startseite.page?dswid=2820&hn=2&firstwindow=true"
     updateHeadersFromCookies()
+    
     local response = connection:request("GET", accountsUrl, nil, nil, headers)
     if not response then
-        error("Fehler beim Abrufen der Konten.")
+        error("Failed to retrieve accounts")
     end
+    
     if not response:lower():find("<!doctype html>") then
-        error("Erwarteter HTML-Inhalt wurde nicht empfangen.")
+        error("Expected HTML content was not received")
     end
-
+    
     local accounts = {}
+    
+    -- Extract account information from each section
     for section in response:gmatch('<section%s+class="account%-table">(.-)</section>') do
         local accountUrl = section:match('<div%s+class="headerName">.-<a%s+href="([^"]+)"')
-        local name       = section:match('<div%s+class="headerName">.-<a%s+href="[^"]+"[^>]*>(.-)</a>')
-        local number     = section:match('<div%s+class="headerNumber">.-<a[^>]*>(.-)</a>')
-        local balance    = section:match('<div%s+class="headerWert">.-<a[^>]*>(.-)</a>')
-
-        -- Falls kein Saldo gefunden wurde, versuche einen JSON-Datensatz zu nutzen
+        local name = section:match('<div%s+class="headerName">.-<a%s+href="[^"]+"[^>]*>(.-)</a>')
+        local number = section:match('<div%s+class="headerNumber">.-<a[^>]*>(.-)</a>')
+        local balance = section:match('<div%s+class="headerWert">.-<a[^>]*>(.-)</a>')
+        
+        -- Try to find balance in JSON data if not found in HTML
         if not balance or balance == "" then
             local jsonString = response:match('data%-options="({.-})"')
             if jsonString then
-                local jsonData = json.decode(jsonString)
-                for _, inhaber in ipairs(jsonData) do
-                    for _, konto in ipairs(inhaber.geschaefte) do
-                        if konto.iban == number then
-                            balance = konto.saldo
-                            break
+                local jsonString = jsonString:gsub("&quot;", '"')
+                local ok, jsonData = pcall(JSON, jsonString)
+                
+                if ok and jsonData then
+                    local data = jsonData:dictionary()
+                    if data.inhaber then
+                        for _, inhaber in ipairs(data.inhaber) do
+                            if inhaber.geschaefte then
+                                for _, konto in ipairs(inhaber.geschaefte) do
+                                    if konto.iban == number then
+                                        balance = konto.saldo
+                                        break
+                                    end
+                                end
+                            end
                         end
                     end
                 end
             end
         end
-
-        if not balance or balance == "" then
-            print("WARNUNG: Kein Saldo für Konto " .. tostring(number) .. " gefunden!")
-        end
-
-        if accountUrl and name and number and balance then
-            name    = extractText(name)
-            number  = extractText(number)
+        
+        if accountUrl and name and number then
+            name = extractText(name)
+            number = extractText(number)
             balance = parseAmount(extractText(balance) or "0")
+            
+            -- Build full URL if relative
             local fullUrl = accountUrl
             if not accountUrl:match("^https?://") then
                 fullUrl = HomePage() .. accountUrl
             end
-            -- Extrahiere die eindeutige Konto-ID aus dem Link
+            
+            -- Extract account ID
             local kontoId = fullUrl:match("kontoId=(%d+)")
-            print(string.format("Konto-Link: %s | Name: %s | Nummer: %s | Balance: %s | kontoId: %s", 
-                  fullUrl, name, number, balance, tostring(kontoId)))
             local cleanedNumber = cleanAccountNumber(number)
-            LocalStorage["kontoId_" .. cleanedNumber] = kontoId
+            
+            -- Store account ID for later use
+            if kontoId then
+                LocalStorage["kontoId_" .. cleanedNumber] = kontoId
+            end
+            
+            -- Determine account type
+            local accountType = AccountTypeSavings
+            if name:find("Girokonto") then
+                accountType = AccountTypeGiro
+            end
+            
             table.insert(accounts, {
                 name = name,
                 owner = "",
@@ -280,109 +324,112 @@ function ListAccounts(knownAccounts)
                 kontoId = kontoId,
                 bankCode = "",
                 currency = "CHF",
-                type = (name:find("Girokonto") and AccountTypeGiro) or AccountTypeSavings
+                type = accountType
             })
         end
     end
-
+    
     if #accounts == 0 then
-        error("Konnte keine Kontodaten im HTML extrahieren.")
+        error("Could not extract any account data from HTML")
     end
-
+    
     return accounts
 end
 
-
---------------------------------------------------------------------------------
--- Ruft den aktuellen Kontostand und die Transaktionen eines Kontos ab.
---------------------------------------------------------------------------------
+-- Refresh account transactions
 function RefreshAccount(account, since)
-    print("Umsätze abrufen für Konto: " .. account.accountNumber)
     local kontoId = account.kontoId or LocalStorage["kontoId_" .. account.accountNumber]
     if not kontoId then
-        error("Kein kontoId gefunden für Konto " .. account.accountNumber)
+        error("No kontoId found for account " .. account.accountNumber)
     end
-
+    
     local transactionsUrl = HomePage() .. "/page/kontozahlungen/konto.page?dswid=2820&kontoId=" .. kontoId .. "&activeTabId=kontoauszug&hn=1"
     updateHeadersFromCookies()
+    
     local response = connection:request("GET", transactionsUrl, nil, nil, headers)
     if not response then
-        error("Fehler beim Abrufen der Transaktionen. URL: " .. tostring(transactionsUrl))
+        error("Failed to retrieve transactions")
     end
-
-    local balanceExtract = response:match('<span%s+class="font%-size%-24%s+nospace">%s*<span>CHF%s*([^<]+)</span>')
-                          or response:match('<span%s+class="saldo%s+ng%-binding%s+ng%-scope"[^>]*>CHF%s*([^<]+)</span>')
+    
+    -- Extract current balance
+    local balanceExtract = response:match('<span%s+class="font%-size%-24%s+nospace">%s*<span>CHF%s*([^<]+)</span>') or
+                           response:match('<span%s+class="saldo%s+ng%-binding%s+ng%-scope"[^>]*>CHF%s*([^<]+)</span>')
     local balance = balanceExtract and parseAmount(balanceExtract) or (account.balance or 0)
     
+    -- Extract transactions table
     local transactions = {}
     local tableHtml = response:match('<table%s+class="tbl%s+tbl%-data%s+kontoauszug%-brushup%-table".-</table>')
+    
     if not tableHtml then
-        error("Konnte die Transaktionstabelle nicht finden. Response: " .. tostring(response:sub(1,500)))
+        return { balance = balance, transactions = transactions, pendingBalance = 0 }
     end
-
-    for dateStr, titlePart, extraText, debitStr, creditStr, valutaStr, _ in tableHtml:gmatch(
-        '<tr>%s*<td[^>]*>.-</td>%s*' ..
-        '<td%s+headers="th1">.-<a[^>]*>(.-)</a>.-</td>%s*' ..
-        '<td%s+headers="th2">.-<a[^>]*>(.-)</a>(.-)</td>%s*' ..
-        '<td%s+headers="th3"[^>]*>(.-)</td>%s*' ..
-        '<td%s+headers="th4"[^>]*>(.-)</td>%s*' ..
-        '<td%s+headers="th5">(.-)</td>%s*' ..
-        '<td%s+headers="th6"[^>]*>(.-)</td>%s*</tr>'
-    ) do
-        local day, month, year = dateStr:match("(%d%d)%.(%d%d)%.(%d%d%d%d)")
-        local bookingDate = os.time({year = year, month = month, day = day})
+    
+    -- Parse transactions
+    local pattern = '<tr>%s*<td[^>]*>.-</td>%s*' ..
+                    '<td%s+headers="th1">.-<a[^>]*>(.-)</a>.-</td>%s*' ..
+                    '<td%s+headers="th2">.-<a[^>]*>(.-)</a>(.-)</td>%s*' ..
+                    '<td%s+headers="th3"[^>]*>(.-)</td>%s*' ..
+                    '<td%s+headers="th4"[^>]*>(.-)</td>%s*' ..
+                    '<td%s+headers="th5">(.-)</td>%s*' ..
+                    '<td%s+headers="th6"[^>]*>(.-)</td>%s*</tr>'
+    
+    for dateStr, titlePart, extraText, debitStr, creditStr, valutaStr, _ in tableHtml:gmatch(pattern) do
+        local bookingDate = parseDate(dateStr)
+        if not bookingDate then
+            goto continue
+        end
+        
+        -- Process transaction text
         local part1 = extractText(titlePart)
         local part2 = extractText(extraText)
-        -- Kombiniere beide Teile (falls extraText vorhanden ist)
         local fullText = part1
         if part2 ~= "" then
             fullText = fullText .. " " .. part2
         end
-        -- Teile den kombinierten Text in Titel und Verwendungszweck auf
+        
         local transTitle, transPurpose = splitTransactionText(fullText)
         
-        local function parseAmt(str)
-            local cleaned = str:gsub("'", ""):gsub("CHF%.", ""):gsub("%s", "")
-            return tonumber(cleaned) or 0
-        end
-        local debitAmt = parseAmt(debitStr)
-        local creditAmt = parseAmt(creditStr)
+        -- Process amount
+        local debitAmt = parseAmount(debitStr)
+        local creditAmt = parseAmount(creditStr)
         local amount = (debitAmt > 0 and -debitAmt) or creditAmt
-        local booked = true
-        local valueDate = nil
-        local d2, m2, y2 = valutaStr:match("(%d%d)%.(%d%d)%.(%d%d%d%d)")
-        if d2 and m2 and y2 then
-            valueDate = os.time({year = y2, month = m2, day = d2})
-        else
-            booked = false
+        
+        -- Process value date
+        local valueDate = parseDate(valutaStr)
+        local booked = valueDate ~= nil
+        if not booked then
             valueDate = bookingDate
         end
+        
         table.insert(transactions, {
             bookingDate = bookingDate,
             valueDate = valueDate,
-            name = transTitle,         -- Verwende den aufgeteilten Titel
-            purpose = transPurpose,    -- und den aufgeteilten Verwendungszweck
+            name = transTitle,
+            purpose = transPurpose,
             amount = amount,
             currency = "CHF",
             booked = booked
         })
+        
+        ::continue::
     end
-
+    
+    -- Calculate pending balance
     local pendingTotal = 0
     for _, t in ipairs(transactions) do
         if not t.booked then
             pendingTotal = pendingTotal + t.amount
         end
     end
-
-    print("Saldo: " .. tostring(balance))
-    return { balance = balance, transactions = transactions, pendingBalance = pendingTotal }
+    
+    return { 
+        balance = balance,
+        transactions = transactions,
+        pendingBalance = pendingTotal
+    }
 end
 
---------------------------------------------------------------------------------
--- Schliesst die Verbindung.
---------------------------------------------------------------------------------
+-- Close the connection
 function EndSession()
-    print("Session beenden")
     connection:close()
 end
