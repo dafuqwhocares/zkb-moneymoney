@@ -31,8 +31,7 @@ Diese Web Banking Extension ermöglicht den Zugriff auf Konten der Zürcher Kant
 
 ### Betaversion installieren
 
-Diese Extension funktioniert ausschließlich mit Beta-Versionen von MoneyMoney.  
-Um eine Beta-Version zu erhalten, aktiviere in den allgemeinen Einstellungen die Option **"Participate in beta tests"** und **"Display pre-release versions"**.
+Diese Extension funktioniert ausschließlich mit Beta-Versionen von MoneyMoney. Eine signierte Version kann auf der offiziellen Website heruntergeladen werden: https://moneymoney.app/extensions/
 
 ### Installation
 
