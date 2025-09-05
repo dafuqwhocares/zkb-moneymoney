@@ -3,7 +3,7 @@
 -- Copyright 2024-2025 Ansgar Scheffold
 --------------------------------------------------------------------------------
 WebBanking{
-    version     = 1.01,
+    version     = 1.02,
     url         = "https://onba.zkb.ch",
     services    = {"Zürcher Kantonalbank"},
     description = "Abfrage des ZKB Kontos mit Foto-TAN-Authentifizierung"
@@ -243,41 +243,53 @@ end
 
 -- List all accounts
 function ListAccounts(knownAccounts)
-    local accountsUrl = BASE_URL .. "/page/meinefinanzen/startseite.page?dswid=2820&hn=2&firstwindow=true"
-    updateHeadersFromCookies()
-    
-    local response = connection:request("GET", accountsUrl, nil, nil, headers)
-    if not response then
-        error("Failed to retrieve accounts")
+    -- 1) Primär: bekannte Startseite (mit Parametern)
+    local tryUrls = {
+        BASE_URL .. "/page/meinefinanzen/startseite.page?dswid=2820&hn=2&firstwindow=true",
+        -- 2) Fallback: gleiche Seite ohne volatile Parameter (oft genügt das)
+        BASE_URL .. "/page/meinefinanzen/startseite.page"
+    }
+
+    local function fetch(url)
+        updateHeadersFromCookies()
+        return connection:request("GET", url, nil, nil, headers)
     end
-    
-    if not response:lower():find("<!doctype html>") then
-        error("Expected HTML content was not received")
+
+    local response, html
+    for _, url in ipairs(tryUrls) do
+        response = fetch(url)
+        if response and response:find("<html", 1, true) then
+            html = response
+            break
+        end
     end
-    
+
+    if not html then
+        error("Failed to retrieve accounts (no HTML received from start page or fallback)")
+    end
+
     local accounts = {}
-    
-    -- Extract account information from each section
-    for section in response:gmatch('<section%s+class="account%-table">(.-)</section>') do
+
+    -- Account-Sektionen extrahieren
+    for section in html:gmatch('<section%s+class="account%-table">(.-)</section>') do
         local accountUrl = section:match('<div%s+class="headerName">.-<a%s+href="([^"]+)"')
-        local name = section:match('<div%s+class="headerName">.-<a%s+href="[^"]+"[^>]*>(.-)</a>')
-        local number = section:match('<div%s+class="headerNumber">.-<a[^>]*>(.-)</a>')
-        local balance = section:match('<div%s+class="headerWert">.-<a[^>]*>(.-)</a>')
-        
-        -- Try to find balance in JSON data if not found in HTML
-        if not balance or balance == "" then
-            local jsonString = response:match('data%-options="({.-})"')
+        local name       = section:match('<div%s+class="headerName">.-<a%s+href="[^"]+"[^>]*>(.-)</a>')
+        local number     = section:match('<div%s+class="headerNumber">.-<a[^>]*>(.-)</a>')
+        local balance    = section:match('<div%s+class="headerWert">.-<a[^>]*>(.-)</a>')
+
+        -- Falls Saldo nicht im sichtbaren HTML steht: aus data-options JSON ziehen (falls vorhanden)
+        if (not balance or balance == "") then
+            local jsonString = html:match('data%-options="({.-})"')
             if jsonString then
-                local jsonString = jsonString:gsub("&quot;", '"')
+                jsonString = jsonString:gsub("&quot;", '"')
                 local ok, jsonData = pcall(JSON, jsonString)
-                
                 if ok and jsonData then
                     local data = jsonData:dictionary()
                     if data.inhaber then
                         for _, inhaber in ipairs(data.inhaber) do
                             if inhaber.geschaefte then
                                 for _, konto in ipairs(inhaber.geschaefte) do
-                                    if konto.iban == number then
+                                    if konto.iban == (number and cleanAccountNumber(extractText(number)) or "") then
                                         balance = konto.saldo
                                         break
                                     end
@@ -288,33 +300,28 @@ function ListAccounts(knownAccounts)
                 end
             end
         end
-        
+
         if accountUrl and name and number then
-            name = extractText(name)
+            name   = extractText(name)
             number = extractText(number)
             balance = parseAmount(extractText(balance) or "0")
-            
-            -- Build full URL if relative
+
             local fullUrl = accountUrl
             if not accountUrl:match("^https?://") then
                 fullUrl = HomePage() .. accountUrl
             end
-            
-            -- Extract account ID
+
             local kontoId = fullUrl:match("kontoId=(%d+)")
             local cleanedNumber = cleanAccountNumber(number)
-            
-            -- Store account ID for later use
             if kontoId then
                 LocalStorage["kontoId_" .. cleanedNumber] = kontoId
             end
-            
-            -- Determine account type
+
             local accountType = AccountTypeSavings
             if name:find("Girokonto") then
                 accountType = AccountTypeGiro
             end
-            
+
             table.insert(accounts, {
                 name = name,
                 owner = "",
@@ -328,11 +335,12 @@ function ListAccounts(knownAccounts)
             })
         end
     end
-    
+
+    -- Wenn immer noch nichts gefunden wurde, nicht hart abbrechen, sondern klarer Fehlerhinweis
     if #accounts == 0 then
-        error("Could not extract any account data from HTML")
+        error("Could not extract any account data from HTML. Tipp: Die ZKB zeigt Konten nicht auf jeder Startseite – Fallback versucht. Bitte Startseite 'Meine Finanzen' verwenden, falls weiterhin leer.")
     end
-    
+
     return accounts
 end
 
