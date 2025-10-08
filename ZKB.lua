@@ -372,7 +372,7 @@ function RefreshAccount(account, since)
         return { balance = balance, transactions = transactions, pendingBalance = 0 }
     end
     
-    -- Parse transactions
+    -- Parse transactions using the working pattern from the old code
     local pattern = '<tr>%s*<td[^>]*>.-</td>%s*' ..
                     '<td%s+headers="th1">.-<a[^>]*>(.-)</a>.-</td>%s*' ..
                     '<td%s+headers="th2">.-<a[^>]*>(.-)</a>(.-)</td>%s*' ..
@@ -420,6 +420,64 @@ function RefreshAccount(account, since)
         })
         
         ::continue::
+    end
+    
+    -- Check for expandable Dauerauftrag transactions and fetch details
+    local dauerauftragIds = {}
+    
+    -- First, collect all Dauerauftrag buchungIds from the HTML
+    for buchungId, titlePart in tableHtml:gmatch('buchungId=(%d+)[^>]*>([^<]*Dauerauftrag[^<]*)') do
+        dauerauftragIds[buchungId] = true
+    end
+    
+    -- Only fetch details for actual Dauerauftrag transactions
+    if next(dauerauftragIds) then
+        local dswid = response and response:match('meta name="dswid"%s+content="([%-]?%d+)"') or "2820"
+        
+        for buchungId, _ in pairs(dauerauftragIds) do
+            local bookingUrl = HomePage() .. "/page/kontozahlungen/buchung.page?dswid=" .. dswid .. "&buchungId=" .. buchungId .. "&hn=1"
+            updateHeadersFromCookies()
+            local detailResp = connection:request('GET', bookingUrl, nil, nil, headers)
+            
+            if detailResp then
+                -- Look for beneficiary table in the detail page
+                local tbl = detailResp:match('<table%s+class="tbl"([%s%S]-)</table>')
+                if tbl then
+                    -- Parse beneficiary rows
+                    for row in tbl:gmatch('<tr>([%s%S]-)</tr>') do
+                        local ben = row:match('<td[^>]-headers="th1"[^>]->([%s%S]-)</td>') or row:match('<td%s+headers="th1">([%s%S]-)</td>')
+                        local amtStr = row:match('<td[^>]-headers="th3"[^>]->([%s%S]-)</td>') or row:match('<td%s+headers="th3">([%s%S]-)</td>')
+                        
+                        if ben and amtStr then
+                            local name = extractText(ben:gsub('<br%s*/?>','\n'))
+                            local amt = parseAmount(extractText(amtStr))
+                            if amt ~= 0 then
+                                amt = -math.abs(amt) -- details are debits
+                                
+                                -- Extract dates from detail page
+                                local bookingDateStr = detailResp:match('Buchungsdatum</dt>%s*<dd>.-?(%d%d%.%d%d%.%d%d%d%d)')
+                                local valueDateStr = detailResp:match('Valuta</dt>%s*<dd>.-?(%d%d%.%d%d%.%d%d%d%d)')
+                                
+                                local bookingDate = bookingDateStr and parseDate(bookingDateStr) or os.time()
+                                local valueDate = valueDateStr and parseDate(valueDateStr) or bookingDate
+                                local booked = bookingDateStr ~= nil
+                                
+                                -- Add individual beneficiary transaction
+                                table.insert(transactions, {
+                                    bookingDate = bookingDate,
+                                    valueDate = valueDate,
+                                    name = "Belastung Dauerauftrag",
+                                    purpose = name,
+                                    amount = amt,
+                                    currency = "CHF",
+                                    booked = booked
+                                })
+                            end
+                        end
+                    end
+                end
+            end
+        end
     end
     
     -- Calculate pending balance
