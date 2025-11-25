@@ -1,9 +1,9 @@
 --------------------------------------------------------------------------------
 -- Zürcher Kantonalbank (ZKB) Extension for MoneyMoney https://moneymoney-app.com
--- Copyright 2024-2025 Ansgar Scheffold
+-- Copyright 2024-2026 Ansgar Scheffold
 --------------------------------------------------------------------------------
 WebBanking{
-    version     = 1.02,
+    version     = 1.04,
     url         = "https://onba.zkb.ch",
     services    = {"Zürcher Kantonalbank"},
     description = "Abfrage des ZKB Kontos mit Foto-TAN-Authentifizierung"
@@ -136,15 +136,15 @@ end
 --------------------------------------------------------------------------------
 -- TAN handling functions
 --------------------------------------------------------------------------------
--- Poll TAN verification status
+-- Poll TAN verification status using the new API
 function pollTanStatus()
-    local tanStatusUrl = HomePage() .. "/ciam-auth/api/web/webAuth/getOnlineTanVerificationState"
+    local tanStatusUrl = HomePage() .. "/ciam-auth/api/web/webAuth/checkPhotoTanPending"
     local retryInterval, maxRetries = 2, 30
-    
+
     for attempt = 1, maxRetries do
         MM.sleep(retryInterval)
         updateHeadersFromCookies()
-        
+
         local response = connection:request("POST", tanStatusUrl, "", "application/json", headers)
         if not response then
             if attempt == maxRetries then
@@ -153,33 +153,35 @@ function pollTanStatus()
             print("No response from TAN status API. Retrying...")
             goto continue
         end
-        
+
         -- Parse the response
-        local state
         local ok, decoded = pcall(function() return JSON(response):dictionary() end)
-        if ok and type(decoded) == "table" and decoded["state"] then
-            state = decoded["state"]
-        else
-            state = response
+        if not ok then
+            print("Invalid JSON response from TAN status API: " .. response)
+            goto continue
         end
-        
-        -- Clean up quoted string if needed
-        if type(state) == "string" then
-            state = state:gsub('^"(.*)"$', '%1')
+
+        -- Check if this is an error response
+        if decoded["error"] then
+            print("Error response from TAN status API: " .. response)
+            goto continue
         end
-        
-        -- Check the TAN status
-        if state == "CORRECT" then
+
+        -- Check the action class
+        local actionClass = decoded["_class"]
+        if actionClass == "auth.ConfirmationDoneAction" then
             return true
-        elseif state == "FAILED" then
-            error("TAN verification failed. Please try again.")
-        elseif state ~= "NOT_VERIFIED" then
-            error("Unexpected TAN status: " .. (state or "null"))
+        elseif actionClass == "auth.NoneAction" then
+            -- Still pending, continue polling
+            goto continue
+        else
+            print("Unexpected action class: " .. (actionClass or "null"))
+            goto continue
         end
-        
+
         ::continue::
     end
-    
+
     error("TAN verification timed out after " .. maxRetries .. " attempts")
 end
 
