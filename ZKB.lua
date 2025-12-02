@@ -3,7 +3,7 @@
 -- Copyright 2024-2026 Ansgar Scheffold
 --------------------------------------------------------------------------------
 WebBanking{
-    version     = 1.04,
+    version     = 1.05,
     url         = "https://onba.zkb.ch",
     services    = {"Zürcher Kantonalbank"},
     description = "Abfrage des ZKB Kontos mit Foto-TAN-Authentifizierung"
@@ -186,6 +186,84 @@ function pollTanStatus()
 end
 
 --------------------------------------------------------------------------------
+-- Handle post-TAN authentication actions
+--------------------------------------------------------------------------------
+function handlePostTanActions()
+    local maxRetries = 5
+
+    for attempt = 1, maxRetries do
+        updateHeadersFromCookies()
+
+        local nextActionUrl = HomePage() .. "/ciam-auth/api/web/webAuth/getNextActionAfterOnlineTanVerification"
+        local response = connection:request("POST", nextActionUrl, "", "application/json", headers)
+
+        if not response then
+            print("No response from getNextActionAfterOnlineTanVerification")
+            return false
+        end
+
+        local ok, actionData = pcall(function() return JSON(response):dictionary() end)
+        if not ok then
+            print("Invalid JSON response from getNextActionAfterOnlineTanVerification: " .. response)
+            return false
+        end
+
+        local actionClass = actionData["_class"]
+
+        if not actionClass then
+            print("No action class in response")
+            return false
+        end
+
+        print("Post-TAN action: " .. actionClass)
+
+        if actionClass == "auth.ConfirmOrRemoveOrSkipRecoveryPhoneNumberAction" then
+            -- Skip the recovery phone number confirmation
+            local skipUrl = HomePage() .. "/ciam-auth/api/web/webAuth/skipRecoveryPhoneNumber"
+            updateHeadersFromCookies()
+            local skipResponse = connection:request("POST", skipUrl, "", "application/json", headers)
+
+            if not skipResponse then
+                print("Failed to skip recovery phone number")
+                return false
+            end
+
+            local ok, skipData = pcall(function() return JSON(skipResponse):dictionary() end)
+            if ok and skipData["_class"] == "auth.DoneAction" then
+                print("Skipped recovery phone number confirmation successfully")
+                -- After skipping, login should be complete - don't call getNextAction again
+                return true
+            else
+                print("Unexpected response after skipping recovery phone: " .. skipResponse)
+                return false
+            end
+
+        elseif actionClass == "auth.NoneAction" then
+            -- No more actions needed, login complete
+            print("Post-TAN actions completed successfully")
+            return true
+
+        elseif actionClass == "slx.global.ServiceException" then
+            -- This can happen after skipping recovery phone - treat as login complete
+            print("Service exception after post-TAN actions - treating as login complete")
+            return true
+
+        else
+            print("Unhandled post-TAN action: " .. actionClass)
+            -- For unknown actions, we'll assume login is complete for now
+            -- This prevents infinite loops while allowing the extension to work
+            return true
+        end
+
+        -- Small delay before next iteration
+        MM.sleep(1)
+    end
+
+    print("Too many post-TAN action attempts")
+    return false
+end
+
+--------------------------------------------------------------------------------
 -- Core banking functions
 --------------------------------------------------------------------------------
 -- Check if this extension is responsible for the given bank access
@@ -224,16 +302,13 @@ function InitializeSession2(protocol, bankCode, step, credentials, interactive)
     elseif step == 2 then
         -- Step 2: Poll TAN status and complete login
         updateHeadersFromCookies()
-        
+
         if pollTanStatus() then
-            local nextActionUrl = HomePage() .. "/ciam-auth/api/web/webAuth/getNextActionAfterOnlineTanVerification"
-            updateHeadersFromCookies()
-            
-            local response = connection:request("POST", nextActionUrl, "", "application/json", headers)
-            if not response then
-                error("Failed to complete login: No response received")
+            -- After TAN verification, handle any additional actions
+            if not handlePostTanActions() then
+                error("Failed to complete post-TAN authentication steps")
             end
-            
+
             return nil -- Login successful
         else
             error("Login failed")
